@@ -18,28 +18,44 @@ Cargar este skill siempre que se esté construyendo o modificando un agente de I
 
 ## Características que se aplican SIEMPRE a sus agentes
 
-### ⚠️ Regla crítica — guardar estado ANTES de llamar a APIs externas
+### ⚠️ REGLAS ANTI-LOOP — leer antes de escribir cualquier alarm() handler
 
 En Durable Objects, si el `alarm()` lanza una excepción o hace `return` antes de guardar, **Cloudflare reintenta la alarma automáticamente**. Si el estado (pendingChunks, etc.) no fue guardado como vacío antes de la llamada externa, el retry procesa el mismo mensaje en loop → gasto descontrolado.
 
 **Siempre hacer `save()` con el estado limpio ANTES de llamar a OpenAI o cualquier API:**
 
+**Regla 1 — save() ANTES de cualquier API externa:**
 ```typescript
 async alarm(): Promise<void> {
   const conv = await this.load();
   if (!conv || conv.pendingChunks.length === 0) return;
 
-  const userMessage = conv.pendingChunks.join(" ").trim();
-  conv.pendingChunks = []; // limpiar en memoria
+  // Limpiar estado Y guardar ANTES de OpenAI/Chatwoot
+  conv.pendingChunks = [];
   conv.timerActive = false;
-  conv.history.push({ role: "user", content: userMessage });
+  await this.save(conv); // ← si OpenAI falla, el retry ve chunks vacíos → no hace nada
 
-  await this.save(conv); // ← GUARDAR AQUÍ, antes de OpenAI
-
-  // Recién ahora llamar a OpenAI
+  // Recién ahora llamar a APIs externas
   const completion = await openai.chat.completions.create({...});
 }
 ```
+
+**Regla 2 — orden correcto de operaciones en alarm():**
+1. Cargar estado
+2. Si pendingChunks vacío → return (idempotencia)
+3. Limpiar pendingChunks + actualizar history
+4. **`save()` ← acá, antes de todo lo demás**
+5. Llamar a OpenAI
+6. Si falla → return (chunks ya guardados vacíos, retry es inofensivo)
+7. Guardar history con respuesta del asistente → `save()` de nuevo
+8. Enviar mensajes a Chatwoot
+9. Derivar si corresponde
+
+**Regla 3 — los errores de Chatwoot van DESPUÉS del segundo save():**
+Si Chatwoot falla al enviar, no importa — el mensaje de OpenAI ya fue guardado en history y no se vuelve a pedir. El usuario simplemente no recibe la respuesta ese turno.
+
+**Regla 4 — nunca dejar que alarm() lance una excepción sin capturar:**
+Cloudflare reintenta alarmas que fallan. Todo el código dentro de alarm() debe estar envuelto en try/catch o tener paths de return explícitos.
 
 ---
 
