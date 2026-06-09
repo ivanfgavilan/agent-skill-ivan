@@ -18,6 +18,31 @@ Cargar este skill siempre que se esté construyendo o modificando un agente de I
 
 ## Características que se aplican SIEMPRE a sus agentes
 
+### ⚠️ Regla crítica — guardar estado ANTES de llamar a APIs externas
+
+En Durable Objects, si el `alarm()` lanza una excepción o hace `return` antes de guardar, **Cloudflare reintenta la alarma automáticamente**. Si el estado (pendingChunks, etc.) no fue guardado como vacío antes de la llamada externa, el retry procesa el mismo mensaje en loop → gasto descontrolado.
+
+**Siempre hacer `save()` con el estado limpio ANTES de llamar a OpenAI o cualquier API:**
+
+```typescript
+async alarm(): Promise<void> {
+  const conv = await this.load();
+  if (!conv || conv.pendingChunks.length === 0) return;
+
+  const userMessage = conv.pendingChunks.join(" ").trim();
+  conv.pendingChunks = []; // limpiar en memoria
+  conv.timerActive = false;
+  conv.history.push({ role: "user", content: userMessage });
+
+  await this.save(conv); // ← GUARDAR AQUÍ, antes de OpenAI
+
+  // Recién ahora llamar a OpenAI
+  const completion = await openai.chat.completions.create({...});
+}
+```
+
+---
+
 ### 1. Timer de agrupación de mensajes (20s en producción, 10s en pruebas)
 
 Los humanos mandan varios mensajes para decir una sola cosa. El agente NUNCA responde al primer chunk — acumula y espera.
